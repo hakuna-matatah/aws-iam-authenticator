@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
@@ -35,6 +37,15 @@ const (
 	maxWaitIntervalForBatch = 200
 )
 
+var (
+	// ec2_describe_instances_call metric counter
+	ec2DescribeInstancesCall = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "ec2_describe_instances_call",
+			Help: "Number of EC2 describe instances calls.",
+		})
+)
+
 // Get a node name from instance ID
 type EC2Provider interface {
 	GetPrivateDNSName(string) (string, error)
@@ -56,6 +67,11 @@ type ec2ProviderImpl struct {
 	privateDNSCache    ec2PrivateDNSCache
 	ec2Requests        ec2Requests
 	instanceIdsChannel chan string
+}
+
+func init() {
+	logrus.Infof("Registering prometheus metric - ec2DescribeInstancesCall")
+	prometheus.MustRegister(ec2DescribeInstancesCall)
 }
 
 func New(roleARN string, qps int, burst int) EC2Provider {
@@ -100,13 +116,15 @@ func newSession(roleARN string, qps int, burst int) *session.Session {
 		if err != nil {
 			logrus.Errorf("Getting error = %s while creating rate limited client ", err)
 		}
-
+		// override default httpclient to apply rateLimiter.
+		// This will ensure http calls made using this client are rate-limited.
+		sess.Config.HTTPClient = rateLimitedClient
+		stsClient := sts.New(sess, aws.NewConfig().WithSTSRegionalEndpoint(endpoints.RegionalSTSEndpoint))
 		ap := &stscreds.AssumeRoleProvider{
-			Client:   sts.New(sess, aws.NewConfig().WithHTTPClient(rateLimitedClient).WithSTSRegionalEndpoint(endpoints.RegionalSTSEndpoint)),
+			Client:   stsClient,
 			RoleARN:  roleARN,
 			Duration: time.Duration(60) * time.Minute,
 		}
-
 		sess.Config.Credentials = credentials.NewCredentials(ap)
 	}
 	return sess
@@ -190,6 +208,8 @@ func (p *ec2ProviderImpl) GetPrivateDNSName(id string) (string, error) {
 	output, err := p.ec2.DescribeInstances(&ec2.DescribeInstancesInput{
 		InstanceIds: aws.StringSlice([]string{id}),
 	})
+	// increment ec2DescribeInstancesCall metric counter
+	ec2DescribeInstancesCall.Inc()
 	if err != nil {
 		p.unsetRequestInFlightForInstanceId(id)
 		return "", fmt.Errorf("failed querying private DNS from EC2 API for node %s: %s ", id, err.Error())
@@ -250,6 +270,8 @@ func (p *ec2ProviderImpl) getPrivateDnsAndPublishToCache(instanceIdList []string
 	output, err := p.ec2.DescribeInstances(&ec2.DescribeInstancesInput{
 		InstanceIds: aws.StringSlice(instanceIdList),
 	})
+	// increment ec2DescribeInstancesCall metric counter
+	ec2DescribeInstancesCall.Inc()
 	if err != nil {
 		logrus.Errorf("Batch call failed querying private DNS from EC2 API for nodes [%s] : with error = []%s ", instanceIdList, err.Error())
 	} else {

@@ -155,6 +155,9 @@ func (c *Server) Run(stopCh <-chan struct{}) {
 	go func() {
 		http.ListenAndServe(":21363", &healthzHandler{})
 	}()
+	go func() {
+		http.ListenAndServe(":21364", promhttp.Handler())
+	}()
 	if err := c.httpServer.Serve(c.listener); err != nil {
 		logrus.WithError(err).Fatal("http server exited")
 	}
@@ -183,10 +186,6 @@ func (c *Server) getHandler(mappers []mapper.Mapper, ec2DescribeQps int, ec2Desc
 	}
 
 	h.HandleFunc("/authenticate", h.authenticateEndpoint)
-	h.Handle("/metrics", promhttp.Handler())
-	h.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "ok")
-	})
 	logrus.Infof("Starting the h.ec2Provider.startEc2DescribeBatchProcessing ")
 	go h.ec2Provider.StartEc2DescribeBatchProcessing()
 	return h
